@@ -29,8 +29,14 @@ launchd (每天到点触发)
 
 ## 安装
 
+### 方式 A：让 Claude Code 帮你装（推荐，最省事）
+
+打开 [INSTALL-VIA-CLAUDE.md](./INSTALL-VIA-CLAUDE.md)，复制里面那段指令，粘贴到你 Claude Code 对话框。Claude 会先问你 5 个配置问题、引导你扫码登录飞书、全自动装好并首跑。
+
+### 方式 B：手动跑脚本
+
 ```bash
-git clone <这个仓库> feishu-daily-report
+git clone https://github.com/jackchen175x/feishu-daily-report.git
 cd feishu-daily-report
 bash install.sh
 ```
