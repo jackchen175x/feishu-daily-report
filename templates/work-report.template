@@ -1,0 +1,78 @@
+#!/bin/bash
+# 飞书工作日报半自动生成推送 — 每天 ${PUSH_HOUR}:${PUSH_MINUTE} 自动运行
+# Pipeline: claude-mem 查今日 observations → Claude 合成三段 → lark-cli bot 私聊推送
+
+set -euo pipefail
+export PATH="${NODE_BIN_PATH}:$HOME/.npm-global/bin:$HOME/.local/bin:/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin"
+export LANG="zh_CN.UTF-8"
+
+SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+CONFIG_FILE="$SCRIPT_DIR/work-report.config.env"
+PROMPT_TEMPLATE="$SCRIPT_DIR/work-report.prompt.md"
+
+TODAY=$(date +%Y-%m-%d)
+export TODAY
+
+LOG_DIR="$HOME/Library/Logs/work-report"
+STATE_DIR="$HOME/.local/state/work-report"
+mkdir -p "$LOG_DIR" "$STATE_DIR"
+
+LOG_FILE="$LOG_DIR/$TODAY.log"
+STATE_FILE="$STATE_DIR/$TODAY.json"
+RAW_FILE="$STATE_DIR/$TODAY.raw"
+
+exec > >(tee -a "$LOG_FILE") 2>&1
+
+echo "========== 工作日报 $TODAY =========="
+echo "开始时间: $(date)"
+
+if [ ! -f "$CONFIG_FILE" ]; then
+    echo "❌ 配置文件缺失: $CONFIG_FILE"
+    exit 1
+fi
+# shellcheck source=/dev/null
+source "$CONFIG_FILE"
+
+for v in USER_OPEN_ID NOTIFY_OPEN_ID; do
+    if [ -z "${!v:-}" ]; then
+        echo "❌ 未配置: $v（请编辑 $CONFIG_FILE）"
+        exit 1
+    fi
+done
+
+notify_failure() {
+    local exit_code=$?
+    local reason="${1:-unknown}"
+    echo "❌ 失败: $reason (exit=$exit_code)"
+    printf '{"ok":false,"date":"%s","reason":"%s","exit_code":%s,"log":"%s"}\n' \
+        "$TODAY" "$reason" "$exit_code" "$LOG_FILE" > "$STATE_FILE"
+    lark-cli im +messages-send --user-id "$NOTIFY_OPEN_ID" \
+        --text "🚨 工作日报 $TODAY 生成失败
+原因: $reason
+日志: $LOG_FILE" 2>&1 || echo "⚠️ 告警发送也失败了"
+    exit "$exit_code"
+}
+trap 'notify_failure "trap_ERR_line_$LINENO"' ERR
+
+PROMPT=$(TODAY="$TODAY" USER_OPEN_ID="$USER_OPEN_ID" envsubst < "$PROMPT_TEMPLATE")
+
+echo ">>> 调用 Claude headless 生成并推送..."
+set +e
+# macOS 没有 GNU timeout，用 Perl alarm 实现 10 分钟硬兜底
+perl -e 'alarm 600; exec @ARGV' claude -p --permission-mode bypassPermissions --model claude-opus-4-6 <<< "$PROMPT" | tee "$RAW_FILE"
+CLAUDE_EXIT=${PIPESTATUS[0]}
+set -e
+
+if [ "$CLAUDE_EXIT" -ne 0 ]; then
+    notify_failure "claude_exit_$CLAUDE_EXIT"
+fi
+
+if SENT_LINE=$(grep -m1 '^✅ SENT ' "$RAW_FILE"); then
+    echo "✅ 推送成功: $SENT_LINE"
+    printf '{"ok":true,"date":"%s","sent_line":"%s","log":"%s"}\n' \
+        "$TODAY" "$(echo "$SENT_LINE" | sed 's/"/\\"/g')" "$LOG_FILE" > "$STATE_FILE"
+    echo "结束时间: $(date)"
+    exit 0
+else
+    notify_failure "no_sent_flag_in_stdout"
+fi

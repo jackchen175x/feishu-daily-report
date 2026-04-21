@@ -1,0 +1,11 @@
+# 运行时产物
+*.log
+state/
+logs/
+
+# 个人敏感配置（不应提交）
+work-report.config.env
+*.local.env
+
+# macOS
+.DS_Store

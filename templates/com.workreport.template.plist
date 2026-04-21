@@ -1,0 +1,41 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>com.workreport.daily</string>
+
+    <key>ProgramArguments</key>
+    <array>
+        <string>/bin/bash</string>
+        <string>-lc</string>
+        <string>/Users/${WHOAMI}/.local/bin/work-report</string>
+    </array>
+
+    <key>StartCalendarInterval</key>
+    <dict>
+        <key>Hour</key>
+        <integer>${PUSH_HOUR}</integer>
+        <key>Minute</key>
+        <integer>${PUSH_MINUTE}</integer>
+    </dict>
+
+    <key>RunAtLoad</key>
+    <false/>
+
+    <key>EnvironmentVariables</key>
+    <dict>
+        <key>PATH</key>
+        <string>${NODE_BIN_PATH}:/Users/${WHOAMI}/.npm-global/bin:/Users/${WHOAMI}/.local/bin:/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin</string>
+        <key>HOME</key>
+        <string>/Users/${WHOAMI}</string>
+        <key>LANG</key>
+        <string>zh_CN.UTF-8</string>
+    </dict>
+
+    <key>StandardOutPath</key>
+    <string>/Users/${WHOAMI}/Library/Logs/work-report.out.log</string>
+    <key>StandardErrorPath</key>
+    <string>/Users/${WHOAMI}/Library/Logs/work-report.err.log</string>
+</dict>
+</plist>
