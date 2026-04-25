@@ -1,0 +1,127 @@
+#!/bin/bash
+# 收集今天所有 Claude Code 会话的对话原文，输出 markdown
+# 用法：work-report-collect-transcripts [YYYY-MM-DD]
+# 输出：~/.local/state/work-report/transcripts-$DATE.md
+
+set -eu  # 不开 pipefail —— jq | head 截断时会触发 SIGPIPE
+TODAY="${1:-$(date +%Y-%m-%d)}"
+
+PROJECTS="$HOME/.claude/projects"
+OUT_DIR="$HOME/.local/state/work-report"
+OUT="$OUT_DIR/transcripts-$TODAY.md"
+MAX_BYTES=600000   # 单文件最大字节数（约 600KB），超过截断后续会话
+MAX_LINES_PER_SESSION=200
+
+mkdir -p "$OUT_DIR"
+
+# 找今天修改过的 jsonl
+# 排除：
+#   - subagents（agent 内部对话，多余）
+#   - claude-mem-observer（claude-mem 自身索引会话，不是用户对话）
+#   - cwd="/" 的会话（即 ~/.claude/projects/-/*.jsonl，主日报 wrapper 自己调 claude headless 的会话，避免循环）
+FILES_LIST=$(find "$PROJECTS" -name "*.jsonl" -newermt "$TODAY 00:00:00" -type f \
+    ! -path "*/subagents/*" \
+    ! -path "*claude-mem-observer*" \
+    ! -path "$PROJECTS/-/*" \
+    2>/dev/null | sort)
+
+session_count=$(echo "$FILES_LIST" | grep -c . || echo 0)
+
+{
+    echo "# 今日 Claude Code 会话原文 · $TODAY"
+    echo
+    echo "（共 $session_count 个会话）"
+    echo
+} > "$OUT"
+
+written=0
+included=0
+truncated=0
+
+while IFS= read -r f; do
+    [ -z "$f" ] && continue
+    project_dir=$(basename "$(dirname "$f")")
+    # 路径解码：开头 - 去掉，剩余 - 转 /（粗略，不完美但够用）
+    project=$(echo "$project_dir" | sed 's|^-||; s|-|/|g')
+    session=$(basename "$f" .jsonl | cut -c1-8)
+
+    # 提取 user 字符串内容 + assistant text 内容
+    content=$(jq -r '
+      if .type == "user" and (.message.content | type == "string") then
+        "USER: " + .message.content
+      elif .type == "assistant" then
+        (.message.content[]? | select(.type == "text") | "ASSISTANT: " + .text)
+      else
+        empty
+      end
+    ' "$f" 2>/dev/null | head -n "$MAX_LINES_PER_SESSION")
+
+    [ -z "$content" ] && continue
+
+    # 估算这一段大小
+    block_size=$(echo "$content" | wc -c)
+
+    if [ "$written" -gt "$MAX_BYTES" ]; then
+        truncated=$((truncated + 1))
+        continue
+    fi
+
+    {
+        echo "## $project · session $session"
+        echo
+        echo "$content"
+        echo
+    } >> "$OUT"
+
+    written=$((written + block_size + 50))
+    included=$((included + 1))
+done <<< "$FILES_LIST"
+
+# 补一行尾部说明
+if [ "$truncated" -gt 0 ]; then
+    {
+        echo "---"
+        echo "⚠️ 因体积限制截断，省略 $truncated 个会话"
+    } >> "$OUT"
+fi
+
+echo "✓ 收集 $included/$session_count 个会话到 $OUT ($(wc -l < "$OUT") 行, $(du -h "$OUT" | cut -f1))"
+
+# ===== 飞书妙记自动抓取 =====
+# 扫描 transcripts 里出现的飞书妙记 URL，逐个用 headless playwright 抓取智能纪要
+# 抓到的内容 append 到 transcripts 文件，让主日报 prompt 看到
+FETCHER="$HOME/.local/share/feishu-minutes-fetcher/fetch.js"
+if [ -f "$FETCHER" ]; then
+    # 数据源 1：transcripts 里 grep 到的 URL（自动）
+    URLS_FROM_TRANSCRIPTS=$(grep -oE 'https://[a-z0-9.-]+\.feishu\.cn/minutes/[a-zA-Z0-9]+' "$OUT" 2>/dev/null || true)
+    # 数据源 2：watch 文件里手动列的 URL（Jack 早上把今天要总结的会议 URL 写进这里）
+    WATCH_FILE="$OUT_DIR/minutes-watch-$TODAY.txt"
+    URLS_FROM_WATCH=""
+    [ -f "$WATCH_FILE" ] && URLS_FROM_WATCH=$(grep -oE 'https://[a-z0-9.-]+\.feishu\.cn/minutes/[a-zA-Z0-9]+' "$WATCH_FILE" 2>/dev/null || true)
+    # 合并去重
+    MINUTES_URLS=$(printf "%s\n%s\n" "$URLS_FROM_TRANSCRIPTS" "$URLS_FROM_WATCH" | grep -v '^$' | sort -u || true)
+    if [ -n "$MINUTES_URLS" ]; then
+        minutes_count=$(echo "$MINUTES_URLS" | wc -l | tr -d ' ')
+        echo "▸ 发现 $minutes_count 个飞书妙记 URL，开始抓取..."
+        {
+            echo
+            echo "---"
+            echo "# 今日飞书妙记内容（自动抓取）"
+            echo
+        } >> "$OUT"
+        echo "$MINUTES_URLS" | while IFS= read -r url; do
+            [ -z "$url" ] && continue
+            echo "  抓取: $url"
+            if node "$FETCHER" "$url" >> "$OUT" 2>/dev/null; then
+                echo "" >> "$OUT"
+                echo "  ✓ 已 append"
+            else
+                {
+                    echo "（抓取失败: $url）"
+                    echo
+                } >> "$OUT"
+                echo "  ⚠️ 失败"
+            fi
+        done
+    fi
+fi

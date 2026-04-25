@@ -6,19 +6,28 @@
 
 **不征求任何确认，直接执行。**
 
-## Step 1：查询今日工作数据
+## Step 1（首选数据源）：读今日 Claude Code 会话原文
 
-用 MCP 工具 `mcp__plugin_claude-mem_mcp-search__search` 查 claude-mem 当日 observations：
+wrapper 已经把今天所有会话的对话原文汇总到：
 
 ```
-type: "observations"
-dateStart: "$TODAY"
-dateEnd: "$TODAY"
-limit: 80
-orderBy: "date_desc"
+$TRANSCRIPTS_FILE
 ```
 
-字段重点：`title`、`obs_type`（bugfix/feature/refactor/change/discovery/decision/session）、`content`。
+用 Read 工具读这个文件。结构：
+
+```
+## <project-name> · session <8位 hash>
+USER: <用户输入>
+ASSISTANT: <Claude 回复>
+...
+```
+
+**这是最高优先级数据源**，比 claude-mem 的二手摘要可靠得多。每个 `## project-name` 块对应一个具体项目/会话，从 USER + ASSISTANT 里能直接看出今天在那个项目干了什么。
+
+## Step 1.5：claude-mem 作为补充（可选）
+
+`mcp__plugin_claude-mem_mcp-search__search` 查 `type:"observations"` `dateStart/dateEnd:"$TODAY"`，补充细节，不要重复 transcripts 已有的。
 
 ## Step 2：补充数据源（失败就跳过）
 
@@ -77,42 +86,42 @@ ${PERSONAL_PROJECTS}
 - 2~4 条，动词开头（"继续改 XX""约 XXX 聊 XX""上线 XX"）
 - 只写有价值的计划，别写"继续学习""整理文档"这种虚的
 
-## Step 4（硬规则）：通过 lark-cli bot 推送 4 条飞书私聊消息
+## Step 4（硬规则）：通过 lark-cli bot 推送 2 条飞书私聊消息
+
+**消息 1：三段合并成一整段**（一次长按复制即可），**标题不要带日期**。
 
 ```bash
 JACK="$USER_OPEN_ID"
 
-# 消息 1：今日完成工作
-lark-cli im +messages-send --user-id "$JACK" --text "【今日完成工作 · $TODAY】
+# 消息 1：日报正文（三段合一）
+lark-cli im +messages-send --user-id "$JACK" --text "【今日完成工作】
 
-<这里填【今日完成工作】原文>"
+<这里填【今日完成工作】原文>
 
-# 消息 2：今日工作成果
-lark-cli im +messages-send --user-id "$JACK" --text "【今日工作成果 / 数据 · $TODAY】
+【今日工作成果 / 数据】
 
-<这里填【今日工作成果】原文>"
+<这里填【今日工作成果】原文>
 
-# 消息 3：明日计划
-lark-cli im +messages-send --user-id "$JACK" --text "【明日计划工作 · $TODAY】
+【明日计划工作】
 
 <这里填【明日计划工作】原文>"
 
-# 消息 4：操作指引
-lark-cli im +messages-send --user-id "$JACK" --text "✅ 日报 $TODAY 已就绪，三段文字已分别发送↑
-长按对应消息 → 复制 → 粘贴到公司日报对应字段。
-${DEADLINE_HINT}"
+# 消息 2：操作指引
+lark-cli im +messages-send --user-id "$JACK" --text "✅ 日报已就绪，三段已合并在上一条↑
+长按 → 复制 → 粘贴到公司日报。${DEADLINE_HINT}"
 ```
 
 **发送要点**：
-- 每条消息都要用 `--text` 纯文本（方便长按复制）
-- 不要用 markdown / 代码块包裹内容
-- 每条消息的标题用 `【...】` 包起来，正文空一行后再写内容
-- 每个 `lark-cli im +messages-send` 必须等它返回再发下一条，避免乱序
+- 用 `--text` 纯文本（方便长按复制）
+- 不要用 markdown / 代码块包裹
+- 三段标题：`【今日完成工作】`、`【今日工作成果 / 数据】`、`【明日计划工作】`，**不带日期**
+- 段标题后空一行写内容；段与段之间空一行
+- 两条消息按顺序发，等返回再发下一条
 
 ## Step 5：成功输出（stdout 最后必须按以下格式打印）
 
 ```
-✅ SENT msg1=<message_id_1> msg2=<message_id_2> msg3=<message_id_3> msg4=<message_id_4>
+✅ SENT msg1=<message_id_1> msg2=<message_id_2>
 ---DONE---
 <今日完成工作 原文>
 ---RESULT---

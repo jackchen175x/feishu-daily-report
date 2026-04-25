@@ -54,7 +54,13 @@ notify_failure() {
 }
 trap 'notify_failure "trap_ERR_line_$LINENO"' ERR
 
-PROMPT=$(TODAY="$TODAY" USER_OPEN_ID="$USER_OPEN_ID" envsubst < "$PROMPT_TEMPLATE")
+echo ">>> 收集今日 Claude Code transcripts..."
+"$SCRIPT_DIR/work-report-collect-transcripts" "$TODAY" || echo "(collector 失败但继续)"
+
+TRANSCRIPTS_FILE="$STATE_DIR/transcripts-$TODAY.md"
+export TRANSCRIPTS_FILE
+
+PROMPT=$(TODAY="$TODAY" USER_OPEN_ID="$USER_OPEN_ID" TRANSCRIPTS_FILE="$TRANSCRIPTS_FILE" envsubst < "$PROMPT_TEMPLATE")
 
 echo ">>> 调用 Claude headless 生成并推送..."
 set +e

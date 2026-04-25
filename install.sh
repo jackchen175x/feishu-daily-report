@@ -202,13 +202,14 @@ export COMPANY_PROJECTS PERSONAL_PROJECTS NODE_BIN_PATH WHOAMI=$(whoami)
 
 mkdir -p ~/.local/bin ~/Library/LaunchAgents ~/.claude/commands ~/Library/Logs/work-report ~/.local/state/work-report
 
-envsubst < "$TEMPLATES/work-report.template"              > ~/.local/bin/work-report
-envsubst < "$TEMPLATES/work-report.prompt.template.md"    > ~/.local/bin/work-report.prompt.md
-envsubst < "$TEMPLATES/work-report.config.template.env"   > ~/.local/bin/work-report.config.env
-envsubst < "$TEMPLATES/com.workreport.template.plist"     > ~/Library/LaunchAgents/com.workreport.daily.plist
-envsubst < "$TEMPLATES/report-fragment.template.md"       > ~/.claude/commands/report-fragment.md
+envsubst < "$TEMPLATES/work-report.template"                  > ~/.local/bin/work-report
+envsubst < "$TEMPLATES/work-report.prompt.template.md"        > ~/.local/bin/work-report.prompt.md
+envsubst < "$TEMPLATES/work-report.config.template.env"       > ~/.local/bin/work-report.config.env
+cp       "$TEMPLATES/work-report-collect-transcripts.template"  ~/.local/bin/work-report-collect-transcripts
+envsubst < "$TEMPLATES/com.workreport.template.plist"         > ~/Library/LaunchAgents/com.workreport.daily.plist
+envsubst < "$TEMPLATES/report-fragment.template.md"           > ~/.claude/commands/report-fragment.md
 
-chmod 755 ~/.local/bin/work-report
+chmod 755 ~/.local/bin/work-report ~/.local/bin/work-report-collect-transcripts
 chmod 600 ~/.local/bin/work-report.config.env
 chmod 644 ~/.local/bin/work-report.prompt.md ~/Library/LaunchAgents/com.workreport.daily.plist ~/.claude/commands/report-fragment.md
 

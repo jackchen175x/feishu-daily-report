@@ -4,6 +4,14 @@
 
 **适合**：公司用飞书"汇报·工作日报"的、经常忘写日报的、每天用 Claude Code 的。
 
+## 数据源（这套系统的"信息来源"）
+
+按优先级：
+1. **当日所有 Claude Code 会话原文**（自动）—— 扫 `~/.claude/projects/**/*.jsonl`，把今天的 user/assistant 对话提取出来（高保真，不依赖 claude-mem 索引）
+2. **飞书妙记自动总结**（可选）—— 你早上把今天要总结的会议妙记 URL 写到 `~/.local/state/work-report/minutes-watch-$(date +%Y-%m-%d).txt`，主日报跑前用 headless playwright 自动抓妙记的"智能纪要"内容
+3. **claude-mem observations**（补充）
+4. **飞书日历 / 任务**（补充）
+
 ## 它是怎么工作的
 
 ```
