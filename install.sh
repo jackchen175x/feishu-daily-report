@@ -224,6 +224,31 @@ launchctl bootout gui/$(id -u)/com.workreport.daily 2>/dev/null || true
 launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/com.workreport.daily.plist
 ok "launchd 已注册，每天 ${PUSH_HOUR}:${PUSH_MINUTE} 自动触发"
 
+# -------- Step 6.5：飞书妙记自动抓取（可选高级功能） --------
+echo
+say "Step 6.5  飞书妙记自动抓取（playwright headless）"
+FETCHER_DIR="$HOME/.local/share/feishu-minutes-fetcher"
+WR_INSTALL_FETCHER_DEFAULT="${WR_INSTALL_FETCHER:-1}"
+if [ "$WR_INSTALL_FETCHER_DEFAULT" = "1" ] || ([ "$INTERACTIVE" = "1" ] && ask_yn "是否装飞书妙记自动抓取？（让主日报自动总结你今天的飞书会议纪要，需 ~120MB 装 playwright + chromium）"); then
+    mkdir -p "$FETCHER_DIR"
+    cp "$TEMPLATES/feishu-minutes-fetcher/fetch.js"     "$FETCHER_DIR/fetch.js"
+    cp "$TEMPLATES/feishu-minutes-fetcher/package.json" "$FETCHER_DIR/package.json"
+    say "  装 playwright（约 1-2 分钟）..."
+    (cd "$FETCHER_DIR" && npm install --silent 2>&1 | tail -3)
+    say "  下载 chromium（约 2-3 分钟）..."
+    (cd "$FETCHER_DIR" && npx playwright install chromium 2>&1 | tail -3)
+    ok "妙记抓取工具已装：$FETCHER_DIR/fetch.js"
+    warn "⚠️ 还需要扫码登录飞书一次（持久化到 profile，以后免登）："
+    echo "    cd $FETCHER_DIR && nohup node fetch.js login > /tmp/feishu-login.log 2>&1 & disown"
+    echo "    扫完码后 pkill -f 'fetch.js login' 即可"
+    echo
+    echo "  使用：把今天要总结的会议妙记 URL 写到："
+    echo "    ~/.local/state/work-report/minutes-watch-\$(date +%Y-%m-%d).txt"
+    echo "  下次主日报跑时自动抓取，喂给日报合成"
+else
+    warn "跳过妙记抓取。主日报只用 Claude Code 对话原文，不会自动总结飞书会议"
+fi
+
 # -------- Step 7：首跑 --------
 echo
 say "Step 7/7  首跑验证"
