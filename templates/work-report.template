@@ -64,10 +64,13 @@ PROMPT=$(TODAY="$TODAY" USER_OPEN_ID="$USER_OPEN_ID" TRANSCRIPTS_FILE="$TRANSCRI
 
 echo ">>> 健康检查：claude headless 登录态..."
 # 不烧 token：用 claude config list 触发本地 auth 校验
-set +e
-HEALTH_CHECK=$(claude config list 2>&1 | head -3)
-HEALTH_EXIT=$?
-set -e
+# 临时禁用 ERR trap + pipefail，避免 claude 非零退出/SIGPIPE 被 trap 抓住
+trap - ERR
+set +eo pipefail
+HEALTH_CHECK=$(claude config list 2>&1)
+HEALTH_CHECK=$(echo "$HEALTH_CHECK" | head -3)
+set -eo pipefail
+trap 'notify_failure "trap_ERR_line_$LINENO"' ERR
 if echo "$HEALTH_CHECK" | grep -qiE "not logged in|does not have access|organization does not|please run /login"; then
     echo "❌ claude headless 登录态失效，提前终止（不浪费 600s 跑 claude -p）"
     echo "   实际错误：$HEALTH_CHECK"
