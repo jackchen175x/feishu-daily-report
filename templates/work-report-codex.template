@@ -1,0 +1,201 @@
+#!/bin/bash
+# 飞书工作日报半自动生成推送（Codex 版）
+# Pipeline: 收集 Claude/Codex 会话 + 飞书妙记 -> Codex headless 生成 JSON -> lark-cli 推送
+
+set -euo pipefail
+
+export PATH="$HOME/.nvm/versions/node/v22.17.0/bin:$HOME/.npm-global/bin:$HOME/.local/bin:/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin"
+export LANG="zh_CN.UTF-8"
+
+SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+PROJECT_DIR="$HOME/Projects/feishu-daily-report"
+CONFIG_FILE="${WORK_REPORT_CONFIG:-$SCRIPT_DIR/work-report.config.env}"
+PROMPT_TEMPLATE="${WORK_REPORT_PROMPT_TEMPLATE:-$SCRIPT_DIR/work-report-codex.prompt.md}"
+COLLECTOR="${WORK_REPORT_COLLECTOR:-$SCRIPT_DIR/work-report-collect-transcripts-codex}"
+
+TODAY="${WORK_REPORT_DATE:-$(date +%Y-%m-%d)}"
+DRY_RUN="${WORK_REPORT_DRY_RUN:-0}"
+
+LOG_DIR="$HOME/Library/Logs/work-report"
+STATE_DIR="$HOME/.local/state/work-report"
+mkdir -p "$LOG_DIR" "$STATE_DIR"
+
+LOG_FILE="$LOG_DIR/$TODAY.codex.log"
+STATE_FILE="$STATE_DIR/$TODAY.codex.json"
+RAW_FILE="$STATE_DIR/$TODAY.codex.raw"
+LAST_MESSAGE_FILE="$STATE_DIR/$TODAY.codex.last.md"
+REPORT_JSON_FILE="$STATE_DIR/$TODAY.report.json"
+PROMPT_FILE="$STATE_DIR/$TODAY.codex.prompt.md"
+BODY_FILE="$STATE_DIR/$TODAY.body.txt"
+GUIDE_FILE="$STATE_DIR/$TODAY.guide.txt"
+
+exec >> "$LOG_FILE" 2>&1
+
+echo "========== 工作日报 Codex $TODAY =========="
+echo "开始时间: $(date)"
+
+if [ ! -f "$CONFIG_FILE" ]; then
+    echo "配置文件缺失: $CONFIG_FILE"
+    exit 1
+fi
+
+# shellcheck source=/dev/null
+source "$CONFIG_FILE"
+
+USER_OPEN_ID="${USER_OPEN_ID:-${JACK_OPEN_ID:-}}"
+NOTIFY_OPEN_ID="${NOTIFY_OPEN_ID:-$USER_OPEN_ID}"
+
+if [ -z "${USER_OPEN_ID:-}" ]; then
+    echo "未配置 USER_OPEN_ID 或 JACK_OPEN_ID（请编辑 $CONFIG_FILE）"
+    exit 1
+fi
+
+notify_failure() {
+    local exit_code=$?
+    local reason="${1:-unknown}"
+    trap - ERR
+    echo "失败: $reason (exit=$exit_code)"
+    jq -n \
+        --arg date "$TODAY" \
+        --arg reason "$reason" \
+        --arg log "$LOG_FILE" \
+        --argjson exit_code "$exit_code" \
+        '{ok:false,date:$date,reason:$reason,exit_code:$exit_code,log:$log}' > "$STATE_FILE" 2>/dev/null || true
+
+    if [ "$DRY_RUN" = "1" ]; then
+        echo "DRY_RUN=1，跳过失败告警发送"
+    elif [ -n "${NOTIFY_OPEN_ID:-}" ]; then
+        lark-cli im +messages-send --as bot --user-id "$NOTIFY_OPEN_ID" \
+            --text "工作日报 $TODAY 生成失败
+原因: $reason
+日志: $LOG_FILE" 2>&1 || echo "告警发送也失败了"
+    fi
+    exit "$exit_code"
+}
+trap 'notify_failure "trap_ERR_line_$LINENO"' ERR
+
+for bin in jq perl codex lark-cli; do
+    command -v "$bin" >/dev/null 2>&1 || {
+        echo "缺少依赖: $bin"
+        exit 1
+    }
+done
+
+if [ ! -x "$COLLECTOR" ]; then
+    echo "收集器不存在或不可执行: $COLLECTOR"
+    exit 1
+fi
+
+echo ">>> 收集今日 Claude/Codex transcripts..."
+"$COLLECTOR" "$TODAY" || echo "(collector 失败但继续)"
+
+TRANSCRIPTS_FILE="$STATE_DIR/transcripts-$TODAY.md"
+if [ ! -s "$TRANSCRIPTS_FILE" ]; then
+    echo "transcripts 文件为空或不存在: $TRANSCRIPTS_FILE"
+    exit 1
+fi
+
+echo ">>> 生成 Codex prompt..."
+TODAY="$TODAY" envsubst '$TODAY' < "$PROMPT_TEMPLATE" > "$PROMPT_FILE"
+{
+    echo
+    printf '%s\n' '```markdown'
+    sed -n '1,4000p' "$TRANSCRIPTS_FILE"
+    printf '%s\n' '```'
+} >> "$PROMPT_FILE"
+
+echo ">>> 调用 Codex headless 生成日报 JSON..."
+CODEX_ARGS=(--ask-for-approval never --sandbox read-only exec -C "$PROJECT_DIR" --skip-git-repo-check --output-last-message "$LAST_MESSAGE_FILE")
+if [ -n "${WORK_REPORT_CODEX_MODEL:-}" ]; then
+    CODEX_ARGS+=(-m "$WORK_REPORT_CODEX_MODEL")
+fi
+
+set +e
+perl -e 'alarm 900; exec @ARGV' codex "${CODEX_ARGS[@]}" - < "$PROMPT_FILE" | tee "$RAW_FILE"
+CODEX_EXIT=${PIPESTATUS[0]}
+set -e
+
+if [ "$CODEX_EXIT" -ne 0 ]; then
+    notify_failure "codex_exit_$CODEX_EXIT"
+fi
+
+if [ ! -s "$LAST_MESSAGE_FILE" ]; then
+    notify_failure "empty_codex_last_message"
+fi
+
+JSON_TEXT=$(perl -0ne 'if (/```(?:json)?\s*(\{.*?\})\s*```/s) { print $1; exit } elsif (/(\{.*\})/s) { print $1; exit }' "$LAST_MESSAGE_FILE")
+if [ -z "$JSON_TEXT" ]; then
+    notify_failure "no_json_in_codex_output"
+fi
+
+printf "%s\n" "$JSON_TEXT" > "$REPORT_JSON_FILE"
+jq -e '(.done | type == "string" and length > 0) and (.result | type == "string" and length > 0) and (.plan | type == "string" and length > 0)' "$REPORT_JSON_FILE" >/dev/null
+
+DONE=$(jq -r '.done' "$REPORT_JSON_FILE")
+RESULT=$(jq -r '.result' "$REPORT_JSON_FILE")
+PLAN=$(jq -r '.plan' "$REPORT_JSON_FILE")
+
+{
+    echo "【今日完成工作】"
+    echo
+    printf "%s\n" "$DONE"
+    echo
+    echo "【今日工作成果 / 数据】"
+    echo
+    printf "%s\n" "$RESULT"
+    echo
+    echo "【明日计划工作】"
+    echo
+    printf "%s\n" "$PLAN"
+} > "$BODY_FILE"
+
+cat > "$GUIDE_FILE" <<'EOF'
+✅ 日报已就绪，三段已合并在上一条↑
+长按 → 复制 → 粘贴到【汇报·工作日报】。今晚提交即可（公司截止明早 9:00）。
+EOF
+
+send_lark_text() {
+    local text_file="$1"
+    local out_file="$2"
+    local msg_id
+
+    lark-cli im +messages-send --as bot --user-id "$USER_OPEN_ID" --text "$(cat "$text_file")" > "$out_file" 2>&1
+    if jq -e '.ok == true' "$out_file" >/dev/null 2>&1; then
+        msg_id=$(jq -r '.data.message_id // .data.messageId // .message_id // empty' "$out_file")
+        [ -n "$msg_id" ] || msg_id=$(grep -oE 'om_[A-Za-z0-9_]+' "$out_file" | head -n 1 || true)
+        printf "%s" "${msg_id:-sent_without_message_id}"
+        return 0
+    fi
+
+    cat "$out_file"
+    return 1
+}
+
+if [ "$DRY_RUN" = "1" ]; then
+    echo ">>> DRY_RUN=1，跳过飞书发送。日报正文："
+    cat "$BODY_FILE"
+    MSG1="dry_run_msg1"
+    MSG2="dry_run_msg2"
+else
+    echo ">>> 通过 lark-cli 推送飞书私聊..."
+    MSG1=$(send_lark_text "$BODY_FILE" "$STATE_DIR/$TODAY.lark-msg1.json")
+    MSG2=$(send_lark_text "$GUIDE_FILE" "$STATE_DIR/$TODAY.lark-msg2.json")
+fi
+
+jq -n \
+    --arg date "$TODAY" \
+    --arg msg1 "$MSG1" \
+    --arg msg2 "$MSG2" \
+    --arg log "$LOG_FILE" \
+    --arg report_json "$REPORT_JSON_FILE" \
+    --arg body "$BODY_FILE" \
+    '{ok:true,date:$date,msg1:$msg1,msg2:$msg2,log:$log,report_json:$report_json,body:$body}' > "$STATE_FILE"
+
+echo "SENT msg1=$MSG1 msg2=$MSG2"
+echo "---DONE---"
+printf "%s\n" "$DONE"
+echo "---RESULT---"
+printf "%s\n" "$RESULT"
+echo "---PLAN---"
+printf "%s\n" "$PLAN"
+echo "结束时间: $(date)"

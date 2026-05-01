@@ -1,0 +1,162 @@
+#!/bin/bash
+# 读取日报 JSON，验证后通过 lark-cli 推送给 Jack。
+# 用法：
+#   work-report-send-json report.json
+#   echo '{"done":"...","result":"...","plan":"..."}' | work-report-send-json
+
+set -euo pipefail
+
+export PATH="$HOME/.nvm/versions/node/v22.17.0/bin:$HOME/.npm-global/bin:$HOME/.local/bin:/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin"
+export LANG="zh_CN.UTF-8"
+
+SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+CONFIG_FILE="${WORK_REPORT_CONFIG:-$SCRIPT_DIR/work-report.config.env}"
+TODAY="${WORK_REPORT_DATE:-$(date +%Y-%m-%d)}"
+DRY_RUN="${WORK_REPORT_DRY_RUN:-0}"
+
+LOG_DIR="$HOME/Library/Logs/work-report"
+STATE_DIR="$HOME/.local/state/work-report"
+mkdir -p "$LOG_DIR" "$STATE_DIR"
+
+LOG_FILE="$LOG_DIR/$TODAY.send.log"
+STATE_FILE="$STATE_DIR/$TODAY.codex.json"
+REPORT_JSON_FILE="${1:-$STATE_DIR/$TODAY.report.json}"
+BODY_FILE="$STATE_DIR/$TODAY.body.txt"
+GUIDE_FILE="$STATE_DIR/$TODAY.guide.txt"
+
+exec >> "$LOG_FILE" 2>&1
+
+if [ ! -f "$CONFIG_FILE" ]; then
+    echo "配置文件缺失: $CONFIG_FILE"
+    exit 1
+fi
+
+# shellcheck source=/dev/null
+source "$CONFIG_FILE"
+
+USER_OPEN_ID="${USER_OPEN_ID:-${JACK_OPEN_ID:-}}"
+NOTIFY_OPEN_ID="${NOTIFY_OPEN_ID:-$USER_OPEN_ID}"
+
+if [ -z "${USER_OPEN_ID:-}" ]; then
+    echo "未配置 USER_OPEN_ID 或 JACK_OPEN_ID（请编辑 $CONFIG_FILE）"
+    exit 1
+fi
+
+notify_failure() {
+    local exit_code=$?
+    local reason="${1:-unknown}"
+    trap - ERR
+    echo "失败: $reason (exit=$exit_code)"
+    jq -n \
+        --arg date "$TODAY" \
+        --arg reason "$reason" \
+        --arg log "$LOG_FILE" \
+        --argjson exit_code "$exit_code" \
+        '{ok:false,date:$date,reason:$reason,exit_code:$exit_code,log:$log}' > "$STATE_FILE" 2>/dev/null || true
+
+    if [ "$DRY_RUN" = "1" ]; then
+        echo "DRY_RUN=1，跳过失败告警发送"
+    elif [ -n "${NOTIFY_OPEN_ID:-}" ]; then
+        lark-cli im +messages-send --as bot --user-id "$NOTIFY_OPEN_ID" \
+            --text "工作日报 $TODAY 发送失败
+原因: $reason
+日志: $LOG_FILE" 2>&1 || echo "告警发送也失败了"
+    fi
+    exit "$exit_code"
+}
+trap 'notify_failure "trap_ERR_line_$LINENO"' ERR
+
+for bin in jq lark-cli; do
+    command -v "$bin" >/dev/null 2>&1 || {
+        echo "缺少依赖: $bin"
+        exit 1
+    }
+done
+
+if [ "$#" -eq 0 ]; then
+    stdin_payload=$(cat)
+    if [ -z "$stdin_payload" ]; then
+        echo "未提供 JSON：请传文件路径，或通过 stdin 输入"
+        exit 1
+    fi
+    printf "%s\n" "$stdin_payload" > "$REPORT_JSON_FILE"
+fi
+
+if [ ! -s "$REPORT_JSON_FILE" ]; then
+    echo "日报 JSON 文件为空或不存在: $REPORT_JSON_FILE"
+    exit 1
+fi
+
+jq -e '(.done | type == "string" and length > 0) and (.result | type == "string" and length > 0) and (.plan | type == "string" and length > 0)' "$REPORT_JSON_FILE" >/dev/null
+
+DONE=$(jq -r '.done' "$REPORT_JSON_FILE")
+RESULT=$(jq -r '.result' "$REPORT_JSON_FILE")
+PLAN=$(jq -r '.plan' "$REPORT_JSON_FILE")
+
+{
+    echo "【今日完成工作】"
+    echo
+    printf "%s\n" "$DONE"
+    echo
+    echo "【今日工作成果 / 数据】"
+    echo
+    printf "%s\n" "$RESULT"
+    echo
+    echo "【明日计划工作】"
+    echo
+    printf "%s\n" "$PLAN"
+} > "$BODY_FILE"
+
+cat > "$GUIDE_FILE" <<'EOF'
+✅ 日报已就绪，三段已合并在上一条↑
+长按 → 复制 → 粘贴到【汇报·工作日报】。今晚提交即可（公司截止明早 9:00）。
+EOF
+
+send_lark_text() {
+    local text_file="$1"
+    local out_file="$2"
+    local msg_id
+
+    lark-cli im +messages-send --as bot --user-id "$USER_OPEN_ID" --text "$(cat "$text_file")" > "$out_file" 2>&1
+    if jq -e '.ok == true' "$out_file" >/dev/null 2>&1; then
+        msg_id=$(jq -r '.data.message_id // .data.messageId // .message_id // empty' "$out_file")
+        [ -n "$msg_id" ] || msg_id=$(grep -oE 'om_[A-Za-z0-9_]+' "$out_file" | head -n 1 || true)
+        printf "%s" "${msg_id:-sent_without_message_id}"
+        return 0
+    fi
+
+    cat "$out_file"
+    return 1
+}
+
+echo "========== 工作日报发送 $TODAY =========="
+echo "开始时间: $(date)"
+
+if [ "$DRY_RUN" = "1" ]; then
+    echo "DRY_RUN=1，跳过飞书发送。日报正文："
+    cat "$BODY_FILE"
+    MSG1="dry_run_msg1"
+    MSG2="dry_run_msg2"
+else
+    echo "通过 lark-cli 推送飞书私聊..."
+    MSG1=$(send_lark_text "$BODY_FILE" "$STATE_DIR/$TODAY.lark-msg1.json")
+    MSG2=$(send_lark_text "$GUIDE_FILE" "$STATE_DIR/$TODAY.lark-msg2.json")
+fi
+
+jq -n \
+    --arg date "$TODAY" \
+    --arg msg1 "$MSG1" \
+    --arg msg2 "$MSG2" \
+    --arg log "$LOG_FILE" \
+    --arg report_json "$REPORT_JSON_FILE" \
+    --arg body "$BODY_FILE" \
+    '{ok:true,date:$date,msg1:$msg1,msg2:$msg2,log:$log,report_json:$report_json,body:$body}' > "$STATE_FILE"
+
+echo "SENT msg1=$MSG1 msg2=$MSG2"
+echo "---DONE---"
+printf "%s\n" "$DONE"
+echo "---RESULT---"
+printf "%s\n" "$RESULT"
+echo "---PLAN---"
+printf "%s\n" "$PLAN"
+echo "结束时间: $(date)"

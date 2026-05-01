@@ -70,7 +70,30 @@ bash uninstall.sh
 
 ## 使用
 
-### 日常（自动）
+### Codex 自动化（当前推荐）
+
+Claude Code headless 不可用时，使用 Codex App 的自动化做调度和生成，脚本只负责收集材料和发送飞书：
+
+```
+Codex 自动化（每天 18:20）
+  → ~/.local/bin/work-report-collect-transcripts-codex
+  → Codex 根据 ~/.local/bin/work-report-codex.prompt.md 生成 {done,result,plan}
+  → ~/.local/bin/work-report-send-json
+  → lark-cli 私聊推送
+```
+
+相关文件：
+
+| 文件 | 作用 |
+|---|---|
+| `~/.codex/automations/codex/automation.toml` | Codex 自动化配置 |
+| `~/.local/bin/work-report-collect-transcripts-codex` | 收集 Claude / Codex 会话和飞书妙记 |
+| `~/.local/bin/work-report-codex.prompt.md` | 日报生成规则 |
+| `~/.local/bin/work-report-send-json` | 验证 JSON 并发送飞书 |
+
+旧的 `launchd` 任务 `com.jack.work-report` 已不再推荐，它依赖 `claude -p`。
+
+### 旧版 launchd（Claude Code）
 - 每天到点（默认 18:20）launchd 自动触发，飞书收到 4 条消息：
   1. 【今日完成工作 · YYYY-MM-DD】
   2. 【今日工作成果 / 数据 · YYYY-MM-DD】

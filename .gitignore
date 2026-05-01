@@ -9,3 +9,7 @@ work-report.config.env
 
 # macOS
 .DS_Store
+
+# Local scratch files
+.tmp-home/
+AGENTS.md

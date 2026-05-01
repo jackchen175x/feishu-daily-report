@@ -1,0 +1,167 @@
+#!/bin/bash
+# 收集当天 Claude Code + Codex 会话原文，输出 markdown
+# 用法：work-report-collect-transcripts-codex [YYYY-MM-DD]
+# 输出：~/.local/state/work-report/transcripts-$DATE.md
+
+set -eu
+
+TODAY="${1:-$(date +%Y-%m-%d)}"
+OUT_DIR="${WORK_REPORT_STATE_DIR:-$HOME/.local/state/work-report}"
+OUT="$OUT_DIR/transcripts-$TODAY.md"
+MAX_BYTES="${WORK_REPORT_MAX_TRANSCRIPT_BYTES:-650000}"
+MAX_LINES_PER_SESSION="${WORK_REPORT_MAX_LINES_PER_SESSION:-220}"
+
+CLAUDE_PROJECTS="$HOME/.claude/projects"
+CODEX_SESSIONS="$HOME/.codex/sessions"
+REPORT_PROJECT="$HOME/Projects/feishu-daily-report"
+
+mkdir -p "$OUT_DIR"
+
+written=0
+claude_total=0
+claude_included=0
+codex_total=0
+codex_included=0
+truncated=0
+
+append_block() {
+    local source="$1"
+    local title="$2"
+    local content="$3"
+    local block_size
+
+    [ -n "$content" ] || return 0
+    block_size=$(printf "%s" "$content" | wc -c | tr -d ' ')
+
+    if [ "$written" -gt "$MAX_BYTES" ]; then
+        truncated=$((truncated + 1))
+        return 1
+    fi
+
+    {
+        echo "## [$source] $title"
+        echo
+        printf "%s\n" "$content"
+        echo
+    } >> "$OUT"
+
+    written=$((written + block_size + 80))
+    return 0
+}
+
+{
+    echo "# 今日 Claude / Codex 会话原文 · $TODAY"
+    echo
+} > "$OUT"
+
+# ===== Claude Code 会话 =====
+if [ -d "$CLAUDE_PROJECTS" ]; then
+    CLAUDE_FILES=$(find "$CLAUDE_PROJECTS" -name "*.jsonl" -newermt "$TODAY 00:00:00" -type f \
+        ! -path "*/subagents/*" \
+        ! -path "*claude-mem-observer*" \
+        ! -path "$CLAUDE_PROJECTS/-/*" \
+        2>/dev/null | sort || true)
+    claude_total=$(printf "%s\n" "$CLAUDE_FILES" | grep -c . || true)
+
+    while IFS= read -r f; do
+        [ -n "$f" ] || continue
+        project_dir=$(basename "$(dirname "$f")")
+        project=$(printf "%s" "$project_dir" | sed 's|^-||; s|-|/|g')
+        session=$(basename "$f" .jsonl | cut -c1-8)
+
+        content=$(jq -r '
+          if .type == "user" and (.message.content | type == "string") then
+            "USER: " + .message.content
+          elif .type == "assistant" then
+            (.message.content[]? | select(.type == "text") | "ASSISTANT: " + .text)
+          else
+            empty
+          end
+        ' "$f" 2>/dev/null | head -n "$MAX_LINES_PER_SESSION" || true)
+
+        if append_block "Claude" "$project · session $session" "$content"; then
+            [ -z "$content" ] || claude_included=$((claude_included + 1))
+        fi
+    done <<< "$CLAUDE_FILES"
+fi
+
+# ===== Codex 会话 =====
+if [ -d "$CODEX_SESSIONS" ]; then
+    CODEX_FILES=$(find "$CODEX_SESSIONS" -name "rollout-*.jsonl" -newermt "$TODAY 00:00:00" -type f 2>/dev/null | sort || true)
+    codex_total=$(printf "%s\n" "$CODEX_FILES" | grep -c . || true)
+
+    while IFS= read -r f; do
+        [ -n "$f" ] || continue
+        cwd=$(jq -r 'select(.type == "session_meta") | .payload.cwd // empty' "$f" 2>/dev/null | head -n 1 || true)
+        [ -n "$cwd" ] || cwd=$(jq -r 'select(.type == "turn_context") | .payload.cwd // empty' "$f" 2>/dev/null | head -n 1 || true)
+
+        # 排除日报生成器自己的 headless Codex 会话，避免同日手动重跑时递归吃进 prompt/transcripts。
+        case "$cwd" in
+            "$REPORT_PROJECT"|"$REPORT_PROJECT"/*) continue ;;
+        esac
+
+        project="${cwd#$HOME/}"
+        [ "$project" != "$cwd" ] || project="$cwd"
+        [ -n "$project" ] || project="unknown-cwd"
+        session=$(basename "$f" .jsonl | sed 's/^rollout-//' | cut -c1-19)
+
+        content=$(jq -r '
+          if .type == "event_msg" and .payload.type == "user_message" then
+            "USER: " + (.payload.message // "")
+          elif .type == "event_msg" and .payload.type == "agent_message" and ((.payload.phase // "") != "analysis") then
+            "ASSISTANT: " + (.payload.message // "")
+          else
+            empty
+          end
+        ' "$f" 2>/dev/null | head -n "$MAX_LINES_PER_SESSION" || true)
+
+        if append_block "Codex" "$project · session $session" "$content"; then
+            [ -z "$content" ] || codex_included=$((codex_included + 1))
+        fi
+    done <<< "$CODEX_FILES"
+fi
+
+if [ "$truncated" -gt 0 ]; then
+    {
+        echo "---"
+        echo "因体积限制截断，省略 $truncated 个会话"
+    } >> "$OUT"
+fi
+
+echo "✓ 收集 Claude ${claude_included}/${claude_total}，Codex ${codex_included}/${codex_total} 到 $OUT ($(wc -l < "$OUT") 行, $(du -h "$OUT" | cut -f1))"
+
+# ===== 飞书妙记自动抓取 =====
+FETCHER="$HOME/.local/share/feishu-minutes-fetcher/fetch.js"
+if [ -f "$FETCHER" ]; then
+    URLS_FROM_TRANSCRIPTS=$(grep -oE 'https://[a-z0-9.-]+\.feishu\.cn/minutes/[a-zA-Z0-9]+' "$OUT" 2>/dev/null || true)
+    WATCH_FILE="$OUT_DIR/minutes-watch-$TODAY.txt"
+    URLS_FROM_WATCH=""
+    [ -f "$WATCH_FILE" ] && URLS_FROM_WATCH=$(grep -oE 'https://[a-z0-9.-]+\.feishu\.cn/minutes/[a-zA-Z0-9]+' "$WATCH_FILE" 2>/dev/null || true)
+    MINUTES_URLS=$(printf "%s\n%s\n" "$URLS_FROM_TRANSCRIPTS" "$URLS_FROM_WATCH" | grep -v '^$' | sort -u || true)
+
+    if [ -n "$MINUTES_URLS" ]; then
+        minutes_count=$(printf "%s\n" "$MINUTES_URLS" | wc -l | tr -d ' ')
+        echo "▸ 发现 $minutes_count 个飞书妙记 URL，开始抓取..."
+        {
+            echo
+            echo "---"
+            echo "# 今日飞书妙记内容（自动抓取）"
+            echo
+        } >> "$OUT"
+
+        printf "%s\n" "$MINUTES_URLS" | while IFS= read -r url; do
+            [ -n "$url" ] || continue
+            echo "  抓取: $url"
+            if node "$FETCHER" "$url" >> "$OUT" 2>/dev/null; then
+                echo "" >> "$OUT"
+                echo "  ✓ 已 append"
+            else
+                {
+                    echo "（抓取失败: $url）"
+                    echo
+                } >> "$OUT"
+                echo "  ⚠️ 失败"
+            fi
+        done
+    fi
+fi
