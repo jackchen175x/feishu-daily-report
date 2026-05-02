@@ -46,7 +46,9 @@ while IFS= read -r f; do
     session=$(basename "$f" .jsonl | cut -c1-8)
 
     # 提取 user 字符串内容 + assistant text 内容
-    content=$(jq -r '
+    # 关键：按 .timestamp 前缀过滤当天的行（jsonl 文件可能跨日，find -newermt 只看 mtime 会把昨天内容也带进来）
+    content=$(jq -r --arg today "$TODAY" '
+      select((.timestamp // "") | startswith($today)) |
       if .type == "user" and (.message.content | type == "string") then
         "USER: " + .message.content
       elif .type == "assistant" then
